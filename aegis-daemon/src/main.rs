@@ -82,3 +82,14 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+async fn handle_command(cmd: AegisCommand) {
+    match cmd {
+        AegisCommand::KillAgent { agent_id } => {
+            println!("[AEGIS-HV] EMERGENCY KILL issued for agent: {}", agent_id);
+            // 1. Look up the agent's control handle (Wasm Atomic or Process PID)
+            // 2. Trigger the stop mechanism
+            // 3. Broadcast a "Mitigated" event back to the TUI
+        },
+        _ => { /* Handle other commands */ }
+    }
+}
