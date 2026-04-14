@@ -1,4 +1,4 @@
-use aegis_common::SecurityEvent;
+⁷use aegis_common::SecurityEvent;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -46,3 +46,34 @@ impl IpcServer {
         }
     }
 }
+use tokio::io::AsyncReadExt;
+use crate::AegisCommand; // Import the new enum
+
+// Inside your tokio::spawn loop in start_uds_server:
+tokio::spawn(async move {
+    let mut rx = tx_clone.subscribe();
+    let mut buf = [0u8; 1024];
+
+    loop {
+        tokio::select! {
+            // Outbound: Send Security Events to TUI
+            Ok(event) = rx.recv() => {
+                let json = serde_json::to_vec(&event).unwrap();
+                if stream.write_u32(json.len() as u32).await.is_err() { break; }
+                if stream.write_all(&json).await.is_err() { break; }
+            }
+            // Inbound: Listen for Commands from TUI
+            result = stream.read_u32() => {
+                if let Ok(len) = result {
+                    let mut cmd_buf = vec![0u8; len as usize];
+                    if stream.read_exact(&mut cmd_buf).await.is_ok() {
+                        if let Ok(cmd) = serde_json::from_slice::<AegisCommand>(&cmd_buf) {
+                            handle_command(cmd).await; // The logic to actually kill the agent
+                        }
+                    }
+                } else { break; }
+            }
+        }
+    }
+});
+
