@@ -18,3 +18,17 @@ async fn main() -> anyhow::Result<()> {
         println!("[{}] {:?} - {}", event.timestamp, event.severity, event.reason);
     }
 }
+// Inside your TUI event loop (using Ratatui/Crossterm)
+if let Event::Key(key) = event::read()? {
+    if key.code == KeyCode::Char('k') {
+        let cmd = AegisCommand::KillAgent { 
+            agent_id: current_selected_agent.clone() 
+        };
+        let json = serde_json::to_vec(&cmd)?;
+        
+        // Write to the Unix Socket
+        stream.write_u32(json.len() as u32).await?;
+        stream.write_all(&json).await?;
+    }
+}
+
