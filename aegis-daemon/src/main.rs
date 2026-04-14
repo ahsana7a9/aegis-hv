@@ -58,3 +58,27 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+mod ipc;
+mod analysis;
+mod monitor;
+
+use ipc::IpcServer;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // 1. Setup the Broadcast Channel
+    let (server, _main_rx) = IpcServer::new();
+    let tx = server.tx.clone();
+
+    // 2. Start the Shadow Monitor (Passing the Sender)
+    tokio::spawn(async move {
+        // This task now sends events to the broadcast channel
+        monitor::start_shadow_monitoring(tx).await;
+    });
+
+    // 3. Start the IPC Server to listen for TUI connections
+    server.start_uds_server().await?;
+
+    Ok(())
+}
