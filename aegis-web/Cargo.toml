@@ -1,20 +1,26 @@
-use tower_http::cors::{Any, CorsLayer};
+[package]
+name = "aegis-web"
+version = "0.1.0"
+edition = "2021"
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let shared_state = Arc::new(WebState { tx: broadcast::channel(100).0 });
+[dependencies]
+# Shared project protocol
+aegis-common = { path = "../aegis-common" }
 
-    // Define permissive CORS for development
-    // In production, you would restrict this to your dashboard's domain
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+# Web Framework & Async
+axum = "0.7"
+tokio = { version = "1.42", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
 
-    let app = Router::new()
-        .route("/api/command", post(handle_command))
-        .layer(cors) // Attach the CORS middleware
-        .with_state(shared_state);
+# mTLS & HTTPS Support
+# Using axum-server provides a clean way to handle rustls handshakes
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = "0.23"
 
-    // ... rest of the listener logic
-}
+# Middleware (CORS)
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
