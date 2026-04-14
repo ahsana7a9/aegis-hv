@@ -33,3 +33,24 @@ pub enum AegisCommand {
     UpdatePolicy { new_rules_json: String },
     Ping,
 }
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AegisPolicy {
+    pub version: String,
+    pub agent_id: String,
+    pub network: NetworkPolicy,
+    pub filesystem: FilesystemPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkPolicy {
+    pub allow_list: Vec<String>, // List of IPs or Domains
+    pub max_entropy: f64,        // Threshold for exfiltration alerts
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesystemPolicy {
+    pub read_only_paths: Vec<String>,
+    pub forbidden_paths: Vec<String>,
+}
