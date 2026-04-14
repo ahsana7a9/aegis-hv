@@ -1,95 +1,62 @@
 mod analysis;
-use analysis::ThreatAnalyzer;
-// aegis-daemon/src/monitor.rs
+mod ipc;
+mod monitor;
+mod policy;
+mod isolation; // Placeholder for your kill logic
 
-use crate::analysis::ThreatAnalyzer;
-use aegis_common::{SecurityEvent, EventSource, Severity};
+use aya::{include_bytes_aligned, Ebpf};
 use aya::maps::perf::AsyncPerfEventArray;
-use bytes::BytesMut;
+use aegis_common::{AegisCommand, SecurityEvent, Severity, EventSource};
+use ipc::IpcServer;
+use policy::PolicyGuard;
+use std::sync::Arc;
 use chrono::Utc;
 
-pub async fn start_shadow_monitoring(mut perf_array: AsyncPerfEventArray<MapData>) {
-    // We need a buffer for each CPU core
-    let mut buffers = (0..online_cpus().len())
-        .map(|_| BytesMut::with_capacity(4096))
-        .collect::<Vec<_>>();
-
-    loop {
-        // 1. Wait for packets/events from the eBPF kernel program
-        let events = perf_array.read_events(&mut buffers).await.unwrap();
-
-        for i in 0..events.read {
-            let data = &buffers[i];
-            
-            // 2. RUN THE ANALYSIS (Your No. 3 code)
-            let severity = ThreatAnalyzer::assess_risk(data);
-
-            if severity >= Severity::High {
-                let event = SecurityEvent {
-                    timestamp: Utc::now(),
-                    source: EventSource::Shadow,
-                    severity,
-                    agent_id: "hornet-01".to_string(),
-                    action_attempted: "Outbound Network Packet".to_string(),
-                    reason: format!("High entropy: {:.2}", ThreatAnalyzer::calculate_entropy(data)),
-                    mitigated: false,
-                };
-
-                // 3. BROADCAST TO TUI/WEB
-                // This function will send the event through the Unix Socket
-                crate::ipc::broadcast_event(event).await;
-            }
-        }
-    }
-}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load eBPF programs (Shadow Mode)
-    let mut bpf = Ebpf::load(include_bytes_aligned!("../../target/bpfel-unknown-none/debug/aegis-ebpf"))?;
-    let perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
+    println!(" AEGIS-HV DAEMON STARTING...");
 
-    // Start the Monitoring Task
-    tokio::spawn(async move {
-        monitor::start_shadow_monitoring(perf_array).await;
-    });
+    // 1. Load Security Policy
+    let guard = PolicyGuard::load("policies/default.yaml")
+        .expect("Failed to load mandatory security policy");
 
-    // Start the IPC Server (TUI/Web Communication)
-    ipc::start_uds_server().await?;
-
-    Ok(())
-}
-mod ipc;
-mod analysis;
-mod monitor;
-
-use ipc::IpcServer;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // 1. Setup the Broadcast Channel
+    // 2. Initialize IPC (Broadcast Channel for TUI/Web)
     let (server, _main_rx) = IpcServer::new();
     let tx = server.tx.clone();
 
-    // 2. Start the Shadow Monitor (Passing the Sender)
+    // 3. Load eBPF Programs (Shadow Mode Sensors)
+    // Ensure the path matches your xtask build output
+    let mut bpf = Ebpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/debug/aegis-ebpf"
+    ))?;
+    
+    let perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
+
+    // 4. Spawn Shadow Monitor Task
+    // Pass the sender and the policy guard into the monitor
     tokio::spawn(async move {
-        // This task now sends events to the broadcast channel
-        monitor::start_shadow_monitoring(tx).await;
+        if let Err(e) = monitor::start_shadow_monitoring(perf_array, tx, guard).await {
+            eprintln!("[AEGIS-DAEMON] Monitor Task Failed: {}", e);
+        }
     });
 
-    // 3. Start the IPC Server to listen for TUI connections
+    // 5. Start IPC Server (This blocks the main thread and keeps the daemon alive)
     server.start_uds_server().await?;
 
     Ok(())
 }
-async fn handle_command(cmd: AegisCommand) {
+
+/// Handles incoming commands from the TUI or Web UI
+pub async fn handle_command(cmd: AegisCommand) {
     match cmd {
         AegisCommand::KillAgent { agent_id } => {
             println!("[AEGIS-HV] EMERGENCY KILL issued for agent: {}", agent_id);
-            // 1. Look up the agent's control handle (Wasm Atomic or Process PID)
-            // 2. Trigger the stop mechanism
-            // 3. Broadcast a "Mitigated" event back to the TUI
+            // Logic to interface with isolation.rs or Wasmtime handles
+            // crate::isolation::kill_agent(&agent_id).await;
         },
-        _ => { /* Handle other commands */ }
+        AegisCommand::Ping => {
+            println!("[AEGIS-HV] IPC Heartbeat received.");
+        },
+        _ => println!("[AEGIS-HV] Received unhandled command: {:?}", cmd),
     }
 }
