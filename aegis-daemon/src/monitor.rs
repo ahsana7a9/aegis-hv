@@ -1,21 +1,26 @@
 use crate::analysis::ThreatAnalyzer;
-use crate::policy::PolicyGuard; // Assuming PolicyGuard is in policy.rs
+use crate::policy::PolicyGuard;
+use crate::db; // Added for logging
+use crate::AegisState; // Added for state management
 use aegis_common::{SecurityEvent, EventSource, Severity};
 use aya::maps::perf::AsyncPerfEventArray;
 use aya::maps::MapData;
 use tokio::sync::broadcast;
 use chrono::Utc;
+use std::sync::Arc;
+use sqlx::SqlitePool;
 
 pub async fn start_shadow_monitoring(
     mut perf_array: AsyncPerfEventArray<MapData>, 
     tx: broadcast::Sender<SecurityEvent>,
-    guard: PolicyGuard, // Pass the policy guard into the monitor
-) {
+    guard: PolicyGuard,
+    pool: SqlitePool,         // New: for DB logging
+    state: Arc<AegisState>,    // New: for flipping the isolation switch
+) -> anyhow::Result<()> {
     // 16 buffers to match typical CPU core counts or burst handling
     let mut buffers = vec![bytes::BytesMut::with_capacity(1024); 16]; 
 
     loop {
-        // Read events from the Linux kernel
         let events = match perf_array.read_events(&mut buffers).await {
             Ok(e) => e,
             Err(e) => {
@@ -27,32 +32,39 @@ pub async fn start_shadow_monitoring(
         for i in 0..events.read {
             let packet_data = &buffers[i];
             
-            // 1. RUN ENTROPY ANALYSIS
+            // 1. ANALYSIS
             let entropy = ThreatAnalyzer::calculate_entropy(packet_data);
             let severity = ThreatAnalyzer::assess_risk(packet_data);
 
-            // 2. CHECK THE POLICY GUARD
-            if !guard.is_entropy_safe(entropy) || severity >= Severity::High {
-                let mitigated = !guard.is_entropy_safe(entropy);
-                
+            // 2. POLICY EVALUATION
+            let is_violating = !guard.is_entropy_safe(entropy);
+            
+            if is_violating || severity >= Severity::High {
                 let event = SecurityEvent {
                     timestamp: Utc::now(),
                     source: EventSource::Shadow,
-                    severity: if mitigated { Severity::Critical } else { severity },
-                    agent_id: "hornet-swarm-alpha".to_string(), // In production, resolve this via PID
+                    severity: if is_violating { Severity::Critical } else { severity },
+                    agent_id: "hornet-swarm-alpha".to_string(), 
                     action_attempted: "Outbound Network Traffic".to_string(),
-                    reason: format!("Entropy: {:.2} (Threshold: {:.2})", 
+                    reason: format!("Entropy: {:.2} (Max: {:.2})", 
                              entropy, guard.active_policy.network.max_entropy),
-                    mitigated,
+                    mitigated: is_violating,
                 };
 
-                // Broadcast the event to TUI and Web UI
-                let _ = tx.send(event);
+                // 3. BROADCAST TO INTERFACES (TUI/WEB)
+                let _ = tx.send(event.clone());
 
-                // 3. TRIGGER AUTOMATIC MITIGATION
-                if mitigated {
-                    // This function should be implemented in your isolation.rs or main.rs
-                    crate::isolation::trigger_kill("hornet-swarm-alpha").await;
+                // 4. PERSIST TO AUDIT LOG
+                let log_pool = pool.clone();
+                let log_event = event.clone();
+                tokio::spawn(async move {
+                    let _ = db::log_event(&log_pool, &log_event).await;
+                });
+
+                // 5. TRIGGER AUTOMATIC MITIGATION
+                if is_violating {
+                    let isolation_state = Arc::clone(&state);
+                    crate::isolation::trigger_reactive_isolation("hornet-swarm-alpha", &isolation_state).await;
                 }
             }
         }
