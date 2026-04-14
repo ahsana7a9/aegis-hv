@@ -34,3 +34,22 @@ pub async fn start_shadow_monitoring(
         }
     }
 }
+// Inside start_shadow_monitoring loop
+let entropy = ThreatAnalyzer::calculate_entropy(data);
+
+// CHECK THE POLICY
+if !guard.is_entropy_safe(entropy) {
+    // 1. Send High Severity Alert to TUI
+    // 2. TRIGGER MITIGATION: Automatically switch agent to Fortress mode or Kill it
+    let event = SecurityEvent {
+        // ... (standard event details)
+        severity: Severity::Critical,
+        reason: format!("Policy Violation: Entropy {:.2} exceeds limit {:.2}", 
+                 entropy, guard.active_policy.network.max_entropy),
+        mitigated: true, 
+    };
+    
+    // Physically kill the process or stop the Wasm execution
+    trigger_kill(agent_id).await;
+}
+
