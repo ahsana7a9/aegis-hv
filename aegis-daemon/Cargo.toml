@@ -2,3 +2,4 @@
 aegis-common = { path = "../aegis-common" }
 interprocess = "2.4.0" # Best-in-class 2026 IPC crate
 tokio = { version = "1.42", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
