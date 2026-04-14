@@ -1,6 +1,20 @@
-[dependencies]
-aegis-common = { path = "../aegis-common" }
-axum = "0.7"
-tokio = { version = "1.42", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-tower-http = { version = "0.5", features = ["cors"] } # Required for the Frontend
+use tower_http::cors::{Any, CorsLayer};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let shared_state = Arc::new(WebState { tx: broadcast::channel(100).0 });
+
+    // Define permissive CORS for development
+    // In production, you would restrict this to your dashboard's domain
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route("/api/command", post(handle_command))
+        .layer(cors) // Attach the CORS middleware
+        .with_state(shared_state);
+
+    // ... rest of the listener logic
+}
