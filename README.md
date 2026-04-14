@@ -1,3 +1,13 @@
+<p align="center">
+  <img src="https://github.com/ahsana7a9/aegis-hv/blob/main/Assets/Logo.png" width="240"/>
+</p>
+
+<h1 align="center">AEGIS-HV</h1>
+
+<p align="center">
+  <b>Autonomous Hypervisor Security Layer</b><br/>
+  Fortress Isolation • eBPF Runtime • Cryptographic Control
+</p>
 # Aegis-HV
 **The Standalone Security Kernel for Autonomous AI Swarms.**
 
