@@ -1,0 +1,14 @@
+version: "1.0"
+agent_id: "hornet-swarm-01"
+network:
+  allow_list:
+    - "127.0.0.1"
+    - "api.anthropic.com"
+    - "api.openai.com"
+  max_entropy: 7.5
+filesystem:
+  read_only_paths:
+    - "/home/user/project/docs"
+  forbidden_paths:
+    - "/etc/shadow"
+    - "/home/user/.ssh"
