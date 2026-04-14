@@ -42,3 +42,12 @@ aegis-hv run --mode shadow ./my-swarm-module.py
 
 # Run in Fortress Mode with a specific allow-list
 aegis-hv run --mode fortress --allow-net api.openai.com ./agent.wasm
+# Install the BPF linker
+cargo install bpf-linker
+
+# Build the eBPF program
+cargo xtask build-ebpf
+
+# Build the Daemon
+cargo build -p aegis-daemon
+
