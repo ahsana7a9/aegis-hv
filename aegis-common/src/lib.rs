@@ -26,3 +26,10 @@ pub struct SecurityEvent {
     pub reason: String,           // e.g., "Entropy threshold exceeded"
     pub mitigated: bool,          // Was the action successfully blocked?
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AegisCommand {
+    KillAgent { agent_id: String },
+    SwitchMode { agent_id: String, to_fortress: bool },
+    UpdatePolicy { new_rules_json: String },
+    Ping,
+}
