@@ -3,24 +3,30 @@ mod ipc;
 mod monitor;
 mod policy;
 mod isolation;
-mod db; // Added for the logging logic we just wrote
+mod db;
 
 use aya::{include_bytes_aligned, Ebpf};
 use aya::maps::perf::AsyncPerfEventArray;
-use aegis_common::{AegisCommand, SecurityEvent};
+use aegis_common::{AegisCommand, AEGIS_AUTH_HASH};
 use ipc::IpcServer;
 use policy::PolicyGuard;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-// This struct is needed so isolation.rs can modify system state
 pub struct AegisState {
     pub fortress_mode_active: AtomicBool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // --- 0. CRYPTOGRAPHIC OWNERSHIP CHECK ---
+    // If the hash in common/lib.rs doesn't match the author's signature, exit.
+    if AEGIS_AUTH_HASH != "4793f0b097b830d17d12224d455476a6e5a40871e9877b0d8745c4793e2b10a9" {
+        eprintln!("[FATAL] Binary Integrity Compromised: Unauthorized Ownership Signature.");
+        std::process::exit(1);
+    }
+
     println!(" AEGIS-HV DAEMON STARTING...");
 
     // 1. Initialize State & Database
@@ -40,14 +46,12 @@ async fn main() -> anyhow::Result<()> {
     let (server, _) = IpcServer::new();
     let tx = server.tx.clone();
 
-    // 4. Load eBPF Programs
-    // Path check: Ensure this matches your 'cargo xtask build' output
+    // 4. Load eBPF Programs (Shadow Mode Sensors)
     let mut bpf = Ebpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/debug/aegis-ebpf"
     ))?;
     
-    // In 2026, Aya requires us to attach the program to an interface
-    // Note: You'll need to specify an interface like "eth0" or "lo"
+    // Connect to the perf ring buffer in the kernel
     let perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
 
     // 5. Spawn Shadow Monitor Task
@@ -56,7 +60,6 @@ async fn main() -> anyhow::Result<()> {
     let monitor_state = Arc::clone(&state);
 
     tokio::spawn(async move {
-        // Updated monitor signature to include db pool and system state
         if let Err(e) = monitor::start_shadow_monitoring(
             perf_array, 
             monitor_tx, 
@@ -69,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 6. Start IPC Server (Blocks)
+    println!("[AEGIS-HV] IPC server listening for TUI/Web connections...");
     server.start_uds_server().await?;
 
     Ok(())
@@ -82,7 +86,7 @@ pub async fn handle_command(cmd: AegisCommand) {
             isolation::trigger_kill(&agent_id).await;
         },
         AegisCommand::Ping => {
-            // Log/Print heartbeat for debugging
+            println!("[AEGIS-HV] Heartbeat: IPC check valid.");
         },
         _ => println!("[AEGIS-HV] Received unhandled command: {:?}", cmd),
     }
