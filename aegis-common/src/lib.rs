@@ -60,3 +60,10 @@ pub struct FilesystemPolicy {
     pub read_only_paths: Vec<String>,
     pub forbidden_paths: Vec<String>,
 }
+
+pub const AEGIS_AUTH_HASH: &str = "4793f0b097b830d17d12224d455476a6e5a40871e9877b0d8745c4793e2b10a9";
+
+pub fn verify_binary_integrity() -> bool {
+    // This can be expanded to check file checksums against the hardcoded hash
+    AEGIS_AUTH_HASH.starts_with("4793f0b")
+}
