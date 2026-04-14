@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 
+// --- Security Reporting ---
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Severity {
     Low,      // Informational / Minor deviation
@@ -22,10 +24,13 @@ pub struct SecurityEvent {
     pub source: EventSource,
     pub severity: Severity,
     pub agent_id: String,
-    pub action_attempted: String, // e.g., "sys_write to /etc/passwd"
-    pub reason: String,           // e.g., "Entropy threshold exceeded"
-    pub mitigated: bool,          // Was the action successfully blocked?
+    pub action_attempted: String, 
+    pub reason: String,           
+    pub mitigated: bool,          
 }
+
+// --- Command & Control ---
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AegisCommand {
     KillAgent { agent_id: String },
@@ -33,7 +38,8 @@ pub enum AegisCommand {
     UpdatePolicy { new_rules_json: String },
     Ping,
 }
-use serde::{Deserialize, Serialize};
+
+// --- Configuration & Rules ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AegisPolicy {
@@ -45,8 +51,8 @@ pub struct AegisPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkPolicy {
-    pub allow_list: Vec<String>, // List of IPs or Domains
-    pub max_entropy: f64,        // Threshold for exfiltration alerts
+    pub allow_list: Vec<String>,
+    pub max_entropy: f64,        
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
