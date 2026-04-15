@@ -1,18 +1,21 @@
 use std::collections::HashMap;
 
 pub struct ThreatAnalyzer {
-    // Stores the 'Normal' entropy baseline for specific agent roles
+    /// Maps Agent Roles to their learned 'Normal' entropy (e.g., "Hornet-Scout" -> 4.2)
     pub role_baselines: HashMap<String, f64>,
 }
 
 impl ThreatAnalyzer {
     pub fn new() -> Self {
-        Self {
-            role_baselines: HashMap::new(),
-        }
+        let mut role_baselines = HashMap::new();
+        // Default baseline for general intelligence tasks
+        role_baselines.insert("default".to_string(), 4.5);
+        Self { role_baselines }
     }
 
-    /// Shannon Entropy: Detects encrypted data or packed payloads (0.0 to 8.0)
+    /// Shannon Entropy Calculation (H)
+    /// Detects if the agent is exfiltrating compressed or encrypted data.
+    /// Range: 0.0 (Uniform/Low Info) to 8.0 (High Complexity/Encrypted)
     pub fn calculate_entropy(data: &[u8]) -> f64 {
         if data.is_empty() { return 0.0; }
         let mut counts = [0usize; 256];
@@ -24,25 +27,27 @@ impl ThreatAnalyzer {
         }).sum()
     }
 
-    /// Adaptive Anomaly Detection: Compares current entropy against a role's baseline.
-    /// If the deviation is too high, it signals a potential behavioral drift.
+    /// Adaptive Anomaly Detection
+    /// Measures "Behavioral Drift" from the established baseline.
     pub fn assess_anomaly(&self, role: &str, current_entropy: f64) -> f64 {
-        if let Some(&baseline) = self.role_baselines.get(role) {
-            let drift = (current_entropy - baseline).abs();
-            // A drift > 1.5 in entropy usually indicates a shift from text to encrypted/binary data
-            return (drift / 2.0).clamp(0.0, 1.0);
-        }
-        0.0 // No baseline yet, assume safe
+        let baseline = self.role_baselines.get(role).unwrap_or(&4.5);
+        let drift = (current_entropy - baseline).abs();
+        
+        // Critical Threshold: A drift > 1.5 suggests a transition from 
+        // human-readable text to encrypted binary streams.
+        (drift / 2.0).clamp(0.0, 1.0)
     }
 
-    /// Intent Heuristics: Scans raw buffers for unauthorized command patterns.
+    /// Intent Heuristics
+    /// Scans the binary buffers for "Red Line" strings that indicate OS subversion.
     pub fn calculate_risk_score(data: &[u8]) -> f64 {
         let mut score = 0.0;
         let patterns = [
-            (b"/etc/shadow", 0.9),
-            (b"/bin/sh", 0.8),
-            (b"curl ", 0.5),
-            (b"base64", 0.4),
+            (b"/etc/shadow", 0.95), // Direct credential theft attempt
+            (b"/bin/sh", 0.85),     // Shell escape attempt
+            (b"curl ", 0.60),       // Unauthorized external egress
+            (b"base64", 0.50),     // Obfuscation technique
+            (b"chmod", 0.70),      // Permission tampering
         ];
 
         for (pattern, risk) in patterns {
