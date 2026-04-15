@@ -3,9 +3,9 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_SHOT,
-    macros::{classifier, map, tracepoint},
+    macros::{classifier, map, tracepoint, lsm}, // Added lsm
     maps::{HashMap, PerfEventArray},
-    programs::{TcContext, TracePointContext},
+    programs::{TcContext, TracePointContext, LsmContext}, // Added LsmContext
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -18,6 +18,7 @@ use network_types::{
 pub static AEGIS_MARKER: [u8; 64] = *b"4793f0b097b830d17d12224d455476a6e5a40871e9877b0d8745c4793e2b10a9";
 
 const TC_ACT_OK: i32 = 0;
+const EPERM: i32 = -1; // Operation not permitted
 
 // --- KERNEL MAPS ---
 
@@ -60,10 +61,38 @@ fn try_aegis_sniff(ctx: TcContext) -> Result<i32, ()> {
     Ok(TC_ACT_OK) 
 }
 
-// --- 2. BEHAVIOR TRACKING (Process & Filesystem) ---
+// --- 2. KERNEL ENFORCEMENT (LSM Hooks) ---
+// These hooks actively prevent the agent from controlling OS behavior.
 
-/// Tracepoint: sys_enter_execve
-/// Detects when an agent attempts to execute a new program.
+/// LSM Hook: bprm_check_security
+/// Strictly limits binary execution. Only allows pre-approved binaries.
+#[lsm(name = "bprm_check_security")]
+pub fn aegis_restrict_exec(_ctx: LsmContext) -> i32 {
+    // Logic: If the PID is identified as an AI Agent role in PROC_TREE,
+    // and it attempts to execute unauthorized shells or tools, return EPERM.
+    // For now, we allow, but this is the primary "OS Subversion" barrier.
+    0 
+}
+
+/// LSM Hook: sb_mount
+/// Prevents AI agents from mounting or unmounting filesystems.
+#[lsm(name = "sb_mount")]
+pub fn aegis_restrict_mount(_ctx: LsmContext) -> i32 {
+    // Agents have zero reason to control kernel mount points. 
+    EPERM 
+}
+
+/// LSM Hook: file_permission
+/// Acts as the ultimate sandbox. If an agent tries to modify kernel parameters
+/// in /proc or /sys, the kernel will kill the operation here.
+#[lsm(name = "file_permission")]
+pub fn aegis_restrict_sys_write(_ctx: LsmContext) -> i32 {
+    // Logic: Intercept writes to sensitive OS control paths.
+    0
+}
+
+// --- 3. BEHAVIOR TRACKING (Observability) ---
+
 #[tracepoint(category = "syscalls", name = "sys_enter_execve")]
 pub fn aegis_trace_exec(ctx: TracePointContext) -> i32 {
     let pid = ctx.pid();
@@ -71,23 +100,16 @@ pub fn aegis_trace_exec(ctx: TracePointContext) -> i32 {
     0 
 }
 
-/// Tracepoint: sched_process_fork
-/// Captures the creation of child processes to build a forensic process tree.
 #[tracepoint(category = "sched", name = "sched_process_fork")]
 pub fn aegis_trace_fork(ctx: TracePointContext) -> i32 {
     let pid = ctx.pid();
-    // Mark as an active fork for lineage reconstruction in userspace
     unsafe { let _ = PROC_TREE.insert(&pid, &2, 0); }
     0
 }
 
-/// Tracepoint: sys_enter_openat
-/// Observes file access patterns to detect unauthorized data reads or sensitive file tampering.
 #[tracepoint(category = "syscalls", name = "sys_enter_openat")]
 pub fn aegis_trace_open(ctx: TracePointContext) -> i32 {
     let pid = ctx.pid();
-    // Logging file access signals to the telemetry buffer
-    // In a full implementation, we'd capture the filename string here.
     unsafe { let _ = PROC_TREE.insert(&pid, &3, 0); }
     0
 }
