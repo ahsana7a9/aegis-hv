@@ -1,0 +1,17 @@
+[Unit]
+Description=Aegis-HV Autonomous Security Hypervisor
+After=network.target sqlit3.service
+ConditionPathExists=/etc/aegis/policies/default.yaml
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aegis-daemon --config /etc/aegis/policies/default.yaml
+Restart=always
+RestartSec=5
+# Security Hardening
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
