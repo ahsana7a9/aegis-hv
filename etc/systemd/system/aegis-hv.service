@@ -1,0 +1,23 @@
+[Unit]
+Description=Aegis-HV Autonomous Security Hypervisor
+# Ensure it starts after the network but before the Docker/Container swarm
+After=network-pre.target
+Before=docker.service 
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aegis-daemon --config /etc/aegis/config.yaml
+Restart=always
+RestartSec=3s
+
+# HARDENING: Only give the daemon what it needs to control the kernel
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE
+NoNewPrivileges=true
+
+# PERSISTENCE: Ensure logs are written even during heavy load
+Nice=-15
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=multi-user.target
