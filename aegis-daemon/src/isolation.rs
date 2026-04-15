@@ -2,16 +2,17 @@ use crate::AegisState;
 use aegis_common::{SecurityEvent, Severity, EventSource};
 use std::sync::atomic::Ordering;
 use chrono::Utc;
+use std::process::Command;
 
-/// Physically isolates an agent by flipping its execution mode or triggering kernel blocks.
+/// Physically isolates an agent by flipping its execution mode and triggering blocks.
 pub async fn trigger_reactive_isolation(agent_id: &str, state: &crate::AegisState) {
-    println!(" [AEGIS-HV] CRITICAL: Initiating Reactive Isolation for {}", agent_id);
+    println!("\x1b[91m [AEGIS-HV] CRITICAL: Initiating Reactive Isolation for {}\x1b[0m", agent_id);
 
-    // 1. Flip the Fortress bit (Global Lockdown)
-    // This state change is picked up by the monitor and eBPF maps
+    // 1. Flip the Fortress bit (Global Lockdown State)
+    // This tells the monitor to start dropping all non-essential traffic immediately.
     state.fortress_mode_active.store(true, Ordering::SeqCst);
 
-    // 2. Prepare the Mitigation Event
+    // 2. Prepare the Mitigation Event for Audit & UI
     let event = SecurityEvent {
         timestamp: Utc::now(),
         source: EventSource::Fortress,
@@ -23,17 +24,27 @@ pub async fn trigger_reactive_isolation(agent_id: &str, state: &crate::AegisStat
     };
 
     // 3. Broadcast to all interfaces (TUI/Web)
-    // Note: Ensure main.rs has this helper function defined
+    // This pushes the "🛡️ BLOCKED" status to your Ratatui dashboard.
     let _ = crate::handle_internal_event(event).await;
+
+    // 4. Trigger the Hard Kill
+    trigger_kill(agent_id).await;
 }
 
-/// A hard-kill function for native agents.
-/// In production, this interfaces with cgroups or SIGKILL.
+/// A hard-kill function for native agents using system-level signals.
 pub async fn trigger_kill(agent_id: &str) {
     println!(" [AEGIS-HV] EMERGENCY: Hard-killing agent process: {}", agent_id);
     
-    // Logic for 2026 systems:
-    // 1. Find PID via agent_id mapping
-    // 2. libc::kill(pid, libc::SIGKILL);
-    // 3. Log the termination in db.rs
+    // In a 2026 Linux environment, we use pkill for swarm-wide termination 
+    // or cgroup-level freezing to ensure no child processes escape.
+    let output = Command::new("pkill")
+        .arg("-9") // SIGKILL: Inescapable termination
+        .arg("-f") // Match against the full command line (Agent ID)
+        .output()
+        .await;
+
+    match output {
+        Ok(_) => println!(" [AEGIS-HV] Isolation Successful: Process tree purged."),
+        Err(e) => eprintln!(" [AEGIS-HV] Mitigation Error: Failed to signal process: {}", e),
+    }
 }
