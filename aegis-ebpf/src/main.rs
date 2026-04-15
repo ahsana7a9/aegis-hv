@@ -3,9 +3,9 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_SHOT,
-    macros::{classifier, map, tracepoint}, // Added tracepoint
+    macros::{classifier, map, tracepoint},
     maps::{HashMap, PerfEventArray},
-    programs::{TcContext, TracePointContext}, // Added TracePointContext
+    programs::{TcContext, TracePointContext},
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -27,9 +27,9 @@ static BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 #[map]
 static mut EVENTS: PerfEventArray<[u8; 1024]> = PerfEventArray::new(0);
 
-/// Map for Process Visibility: Tracks PIDs attempting specific syscalls
+/// Map for Behavior Tracking: Tracks process state and lineage
 #[map]
-static PROC_VISIBILITY: HashMap<u32, u32> = HashMap::with_max_entries(2048, 0);
+static PROC_TREE: HashMap<u32, u32> = HashMap::with_max_entries(4096, 0);
 
 // --- 1. NETWORK HOOK (Traffic Control) ---
 
@@ -49,7 +49,6 @@ fn try_aegis_sniff(ctx: TcContext) -> Result<i32, ()> {
     let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
     let dst_ip = u32::from_be_bytes(ipv4_hdr.dst_addr);
 
-    // Active Mitigation
     if unsafe { BLOCKLIST.get(&dst_ip).is_some() } {
         return Ok(TC_ACT_SHOT);
     }
@@ -61,21 +60,36 @@ fn try_aegis_sniff(ctx: TcContext) -> Result<i32, ()> {
     Ok(TC_ACT_OK) 
 }
 
-// --- 2. SYSCALL INTERCEPTION (Process Visibility) ---
+// --- 2. BEHAVIOR TRACKING (Process & Filesystem) ---
 
-/// Intercepts the 'execve' syscall to monitor when an agent tries to spawn a new process.
-/// This provides low-level, real-time visibility into the agent's behavior.
+/// Tracepoint: sys_enter_execve
+/// Detects when an agent attempts to execute a new program.
 #[tracepoint(category = "syscalls", name = "sys_enter_execve")]
 pub fn aegis_trace_exec(ctx: TracePointContext) -> i32 {
     let pid = ctx.pid();
-    
-    // Log the PID to our visibility map
-    // The Daemon can read this map to see exactly which agents are spawning sub-processes
-    unsafe {
-        let _ = PROC_VISIBILITY.insert(&pid, &1, 0);
-    }
-    
-    0 // Continue execution
+    unsafe { let _ = PROC_TREE.insert(&pid, &1, 0); }
+    0 
+}
+
+/// Tracepoint: sched_process_fork
+/// Captures the creation of child processes to build a forensic process tree.
+#[tracepoint(category = "sched", name = "sched_process_fork")]
+pub fn aegis_trace_fork(ctx: TracePointContext) -> i32 {
+    let pid = ctx.pid();
+    // Mark as an active fork for lineage reconstruction in userspace
+    unsafe { let _ = PROC_TREE.insert(&pid, &2, 0); }
+    0
+}
+
+/// Tracepoint: sys_enter_openat
+/// Observes file access patterns to detect unauthorized data reads or sensitive file tampering.
+#[tracepoint(category = "syscalls", name = "sys_enter_openat")]
+pub fn aegis_trace_open(ctx: TracePointContext) -> i32 {
+    let pid = ctx.pid();
+    // Logging file access signals to the telemetry buffer
+    // In a full implementation, we'd capture the filename string here.
+    unsafe { let _ = PROC_TREE.insert(&pid, &3, 0); }
+    0
 }
 
 #[panic_handler]
