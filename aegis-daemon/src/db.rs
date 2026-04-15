@@ -4,7 +4,7 @@ use chrono::Utc;
 
 /// Initializes all database schemas for the Aegis-HV environment.
 pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
-    // 1. High-level Security Events (Alerts/Mitigations)
+    // 1. High-level Security Events (Alerts/Mitigations/Policy Breaches)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS security_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,12 +19,14 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // 2. Low-level Behavior Forensics (Syscalls/Network/Process)
+    // 2. Low-level Behavior Forensics (The Forensic "Black Box")
+    // Added agent_id for cross-referencing PID events with verified identities.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS behavior_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            timestamp DATETIME NOT NULL,
             pid INTEGER NOT NULL,
+            agent_id TEXT,
             event_type TEXT NOT NULL, 
             details TEXT NOT NULL,    
             risk_score REAL DEFAULT 0.0
@@ -54,20 +56,22 @@ pub async fn log_event(pool: &SqlitePool, event: &SecurityEvent) -> anyhow::Resu
     Ok(())
 }
 
-/// Logs granular behavior captured from eBPF sensors (The "Black Box" recorder).
+/// Logs granular behavior captured from eBPF sensors (Process/Network/File).
 pub async fn log_behavior(
     pool: &SqlitePool, 
-    pid: u32, 
+    pid: u32,
+    agent_id: Option<&str>,
     event_type: &str, 
     details: &str, 
     risk: f64
 ) -> anyhow::Result<()> {
     let now = Utc::now();
     sqlx::query!(
-        "INSERT INTO behavior_logs (timestamp, pid, event_type, details, risk_score) 
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO behavior_logs (timestamp, pid, agent_id, event_type, details, risk_score) 
+         VALUES (?, ?, ?, ?, ?, ?)",
         now,
         pid,
+        agent_id,
         event_type,
         details,
         risk
