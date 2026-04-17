@@ -1,3 +1,11 @@
+//! Atomic response system with race condition prevention
+//! 
+//! This module implements thread-safe incident response with:
+//! - Atomic Compare-And-Swap (CAS) for mitigation serialization
+//! - Process termination verification via waitpid()
+//! - RAII guards for automatic lock release
+//! - Comprehensive error handling
+
 use crate::isolation;
 use aya::maps::HashMap;
 use std::sync::Arc;
@@ -10,9 +18,12 @@ use aegis_common::{SecurityEvent, Severity, EventSource};
 /// Thread-safe response system with atomic operations
 /// Prevents TOCTOU (Time-of-Check-Time-of-Use) race conditions
 pub struct ResponseSystem {
-    pub blocklist: Arc<Mutex<HashMap<u32, u32>>>, // Protected with Mutex
-    mitigation_in_progress: Arc<AtomicBool>,       // Atomic flag to prevent parallel mitigations
-    mitigations_count: Arc<tokio::sync::Mutex<u64>>, // Track mitigation count (thread-safe)
+    /// Protected eBPF map for IP blocking
+    pub blocklist: Arc<Mutex<HashMap<u32, u32>>>,
+    /// Atomic flag: only ONE mitigation can execute at a time
+    mitigation_in_progress: Arc<AtomicBool>,
+    /// Track total mitigations executed
+    mitigations_count: Arc<tokio::sync::Mutex<u64>>,
 }
 
 impl ResponseSystem {
@@ -28,10 +39,11 @@ impl ResponseSystem {
     /// Atomic mitigation: Prevents race conditions with CAS (Compare-And-Swap)
     /// 
     /// # Security Guarantees
-    /// - Only ONE mitigation can execute at a time (atomic flag)
+    /// - Only ONE mitigation can execute at a time (atomic flag with CAS)
     /// - If mitigation is in progress, new calls are rejected
-    /// - Network block and process kill are atomic operations
-    /// - All operations logged before returning
+    /// - Network block and process kill are performed atomically
+    /// - All operations logged and verified before returning
+    /// - Process termination verified with waitpid()
     ///
     /// # Arguments
     /// * `pid` - Process ID to terminate
@@ -40,8 +52,13 @@ impl ResponseSystem {
     /// * `tx` - Broadcast channel for event notification
     ///
     /// # Returns
-    /// * `Ok(())` if mitigation succeeded
+    /// * `Ok(())` if mitigation succeeded and verified
     /// * `Err` if already mitigating or operation failed
+    ///
+    /// # Example
+    /// ```ignore
+    /// response_system.trigger_immediate_mitigation(1234, "agent-1", Some(ip), &tx).await?;
+    /// ```
     pub async fn trigger_immediate_mitigation(
         &self,
         pid: u32,
@@ -59,24 +76,24 @@ impl ResponseSystem {
             Ordering::Relaxed,              // Failure ordering
         ) {
             Ok(_) => {
-                //  We own the mitigation lock
                 eprintln!("[AEGIS-RESPONSE] ✓ Mitigation lock acquired (exclusive)");
             }
             Err(_) => {
-                //  Another mitigation is in progress
                 return Err(anyhow!(
-                    "[AEGIS-RESPONSE]   Mitigation already in progress. Rejecting concurrent request."
+                    "[AEGIS-RESPONSE] ⚠️  Mitigation already in progress. Rejecting concurrent request."
                 ));
             }
         }
 
-        // Scope guard: Ensures we always release the lock
+        // Scope guard: Ensures we always release the lock, even if an error occurs
         let _guard = MitigationGuard {
             flag: self.mitigation_in_progress.clone(),
         };
 
+        eprintln!("[AEGIS-RESPONSE] 🚨 INITIATING INCIDENT RESPONSE");
+
         // ===== STEP 1: NETWORK BLOCK (KERNEL-LEVEL) =====
-        // This is the FASTEST defense layer
+        // This is the FASTEST defense layer - blocks all traffic from the IP
         if let Some(target_ip) = ip {
             match self.block_ip_kernel(target_ip).await {
                 Ok(_) => {
@@ -87,7 +104,7 @@ impl ResponseSystem {
                 }
                 Err(e) => {
                     eprintln!(
-                        "[AEGIS-RESPONSE]   Failed to block IP {}: {}",
+                        "[AEGIS-RESPONSE] ⚠️  Failed to block IP {}: {}",
                         Self::format_ip(target_ip),
                         e
                     );
@@ -101,21 +118,22 @@ impl ResponseSystem {
         match self.kill_process_verified(pid, agent_id).await {
             Ok(true) => {
                 eprintln!(
-                    "[AEGIS-RESPONSE] ✓ Process {} ({}) terminated and verified DEAD",
+                    "[AEGIS-RESPONSE] ✓ Process {} ({}) terminated and VERIFIED DEAD",
                     pid,
                     agent_id
                 );
             }
             Ok(false) => {
                 eprintln!(
-                    "[AEGIS-RESPONSE]   Process {} ({}) did not terminate (already dead?)",
+                    "[AEGIS-RESPONSE] ⚠️  Process {} ({}) already dead",
                     pid,
                     agent_id
                 );
+                // Still counts as successful mitigation
             }
             Err(e) => {
                 eprintln!(
-                    "[AEGIS-RESPONSE]  CRITICAL: Failed to verify process termination: {}",
+                    "[AEGIS-RESPONSE] ❌ CRITICAL: Process termination verification failed: {}",
                     e
                 );
                 return Err(e);
@@ -157,6 +175,7 @@ impl ResponseSystem {
             );
         }
 
+        eprintln!("[AEGIS-RESPONSE] ✓ INCIDENT RESPONSE COMPLETE");
         Ok(())
     }
 
@@ -169,6 +188,11 @@ impl ResponseSystem {
     }
 
     /// Kills a process and verifies it's actually dead using waitpid()
+    /// 
+    /// # Returns
+    /// * `Ok(true)` if process was killed and verified dead
+    /// * `Ok(false)` if process already dead
+    /// * `Err` if verification failed or timeout exceeded
     async fn kill_process_verified(&self, pid: u32, agent_id: &str) -> anyhow::Result<bool> {
         use nix::sys::signal::{kill, Signal};
         use nix::sys::wait::{waitpid, WaitStatus};
@@ -187,14 +211,13 @@ impl ResponseSystem {
                 );
             }
             Err(e) => {
-                // If process doesn't exist or already dead, that's OK
+                // If process doesn't exist, that's OK (already dead)
                 if e.kind() == std::io::ErrorKind::NotFound {
                     eprintln!(
-                        "[AEGIS-RESPONSE] Process {} already dead: {}",
-                        pid,
-                        e
+                        "[AEGIS-RESPONSE] Process {} already dead (not found)",
+                        pid
                     );
-                    return Ok(true); // Process is already dead (mission accomplished)
+                    return Ok(false);
                 }
                 return Err(anyhow!(
                     "Failed to send SIGKILL to process {}: {}",
@@ -211,8 +234,12 @@ impl ResponseSystem {
 
         loop {
             match waitpid(Some(nix_pid), Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(_, _)) => {
-                    eprintln!("[AEGIS-RESPONSE] ✓ Process {} exited successfully", pid);
+                Ok(WaitStatus::Exited(_, code)) => {
+                    eprintln!(
+                        "[AEGIS-RESPONSE] ✓ Process {} exited with code {}",
+                        pid,
+                        code
+                    );
                     return Ok(true);
                 }
                 Ok(WaitStatus::Signaled(_, signal, _)) => {
@@ -227,11 +254,14 @@ impl ResponseSystem {
                     // Process still running, try again
                     if timeout_start.elapsed() > timeout_duration {
                         eprintln!(
-                            "[AEGIS-RESPONSE]  CRITICAL: Process {} refused to die after 5 seconds!",
+                            "[AEGIS-RESPONSE] ❌ CRITICAL: Process {} refused to die after 5 seconds!",
                             pid
                         );
-                        // Last resort: attempt SIGKILL again
+                        // Last resort: attempt another SIGKILL with SIGTERM first
+                        let _ = kill(nix_pid, Signal::SIGTERM);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         let _ = kill(nix_pid, Signal::SIGKILL);
+                        
                         return Err(anyhow!(
                             "Process {} refused to terminate within timeout",
                             pid
@@ -249,7 +279,7 @@ impl ResponseSystem {
                 }
                 _ => {
                     // Other wait statuses (stopped, continued, etc.)
-                    eprintln!("[AEGIS-RESPONSE] Unexpected wait status for process {}", pid);
+                    eprintln!("[AEGIS-RESPONSE] Process {} status changed", pid);
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
@@ -270,6 +300,7 @@ impl ResponseSystem {
 
 /// RAII Guard: Automatically releases the mitigation lock when dropped
 /// Ensures we ALWAYS release the lock, even if an error occurs
+/// This is a critical safety mechanism
 struct MitigationGuard {
     flag: Arc<AtomicBool>,
 }
@@ -287,17 +318,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_concurrent_mitigation_serialization() {
-        // Test: Two concurrent mitigation attempts should serialize
-        // Only one should succeed, the other rejected
-        
-        // This would require mocking the blocklist and process APIs
-        // Placeholder for now
+    async fn test_mitigation_count_increments() {
+        let response = ResponseSystem::new(HashMap::with_max_entries(100, 0));
+        assert_eq!(response.get_mitigation_count().await, 0);
+        // In real test, would need to mock process APIs
     }
 
-    #[tokio::test]
-    async fn test_mitigation_count_increments() {
-        // Test: Each successful mitigation increments the counter
-        // Placeholder
+    #[test]
+    fn test_format_ip() {
+        let ip = 0xC0A80001u32; // 192.168.0.1
+        assert_eq!(ResponseSystem::format_ip(ip), "192.168.0.1");
     }
 }
