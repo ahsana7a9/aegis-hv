@@ -1,14 +1,34 @@
+# Create the production policy directory structure
+mkdir -p policies
+
+# Check if default.yaml exists
+ls -la policies/default.yaml
+
+# If not, create a basic one (you should customize this)
+cat > policies/default.yaml << 'EOF'
 version: "1.0"
-agent_id: "hornet-swarm-01"
+agent_id: "default"
+
 network:
   allow_list:
-    - "127.0.0.1"
-    - "api.anthropic.com"
-    - "api.openai.com"
-  max_entropy: 7.5
+    - "8.8.8.8"
+    - "1.1.1.1"
+  max_entropy: 6.5
+
 filesystem:
   read_only_paths:
-    - "/home/user/project/docs"
+    - "/etc"
+    - "/sys"
   forbidden_paths:
     - "/etc/shadow"
-    - "/home/user/.ssh"
+    - "/root/.ssh"
+
+security:
+  forbidden_syscalls:
+    - "mount"
+    - "umount2"
+    - "ptrace"
+EOF
+
+# Verify
+cat policies/default.yaml
