@@ -69,29 +69,25 @@ fn try_aegis_sniff(ctx: TcContext) -> Result<i32, ()> {
     }
 
     // ===== SECURITY FIX: BOUNDS CHECKING =====
-    let mut buf = [0u8; MAX_PACKET_SIZE];
-    
-    // Load packet bytes, but limit to MAX_PACKET_SIZE
-    let len = ctx.load_bytes(0, &mut buf).map_err(|_| ())?;
-    
-    // CRITICAL: Enforce upper bound
-    // Even if ctx.load_bytes() returns a value > MAX_PACKET_SIZE,
-    // we clamp it to prevent buffer overflow
-    let safe_len = if len > MAX_PACKET_SIZE {
-        // This should not happen, but we defend against it anyway
-        aya_ebpf::info!("⚠️  Packet larger than buffer: {} > {}", len, MAX_PACKET_SIZE);
-        MAX_PACKET_SIZE
-    } else {
-        len
-    };
+const MAX_PACKET_SIZE: usize = 1024;
 
-    // Only emit event if we have valid data
-    if safe_len > 0 && safe_len <= MAX_PACKET_SIZE {
-        // SAFETY: safe_len is guaranteed <= MAX_PACKET_SIZE
-        let _ = unsafe { EVENTS.output(&ctx, &buf[..safe_len], 0) };
-    }
+let mut buf = [0u8; MAX_PACKET_SIZE];
 
-    Ok(TC_ACT_OK)
+// Load packet bytes, but limit to MAX_PACKET_SIZE
+let len = ctx.load_bytes(0, &mut buf).map_err(|_| ())?;
+
+// CRITICAL: Enforce upper bound
+let safe_len = if len > MAX_PACKET_SIZE {
+    aya_ebpf::info!("⚠️  Packet larger than buffer: {} > {}", len, MAX_PACKET_SIZE);
+    MAX_PACKET_SIZE
+} else {
+    len
+};
+
+// Only emit event if we have valid data
+if safe_len > 0 && safe_len <= MAX_PACKET_SIZE {
+    // SAFETY: safe_len is guaranteed <= MAX_PACKET_SIZE
+    let _ = unsafe { EVENTS.output(&ctx, &buf[..safe_len], 0) };
 }
 
 // --- 2. KERNEL ENFORCEMENT (LSM Hooks) ---
