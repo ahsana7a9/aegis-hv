@@ -18,6 +18,11 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full"] }
+tempfile = "3.8"           # For temporary test directories
+mockito = "1.2"            # For mocking external calls (optional)
+
 # eBPF Loading & Management
 aya = { version = "0.12", features = ["async_tokio"] }
 aya-log = "0.1"
