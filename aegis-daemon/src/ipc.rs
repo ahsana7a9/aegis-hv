@@ -38,7 +38,7 @@ impl SecureIpcServer {
             let perms = metadata.permissions().mode();
             if (perms & 0o077) != 0 {
                 return Err(anyhow!(
-                    "❌ SECURITY ERROR: Socket directory has insecure permissions: {:o}\n\
+                    " SECURITY ERROR: Socket directory has insecure permissions: {:o}\n\
                      Must be 0700 or 0750 for security (root-only or root+group)\n\
                      Fix: sudo chmod 0700 {}",
                     perms, socket_dir
@@ -72,7 +72,7 @@ impl SecureIpcServer {
 
         if peer.uid != 0 {
             return Err(anyhow!(
-                "❌ SECURITY ALERT: Connection attempt from non-root peer (UID {})\n\
+                " SECURITY ALERT: Connection attempt from non-root peer (UID {})\n\
                  Only root (UID 0) can control the daemon",
                 peer.uid
             ));
@@ -114,7 +114,7 @@ impl SecureIpcServer {
                             });
                         }
                         Err(e) => {
-                            eprintln!("[AEGIS-IPC] ⚠️  {}", e);
+                            eprintln!("[AEGIS-IPC]   {}", e);
                         }
                     }
                 }
@@ -156,7 +156,7 @@ impl SecureIpcServer {
                         Ok(len) => {
                             if len > MAX_MESSAGE_SIZE {
                                 eprintln!(
-                                    "[AEGIS-IPC] ❌ Message too large: {} bytes (max: {})",
+                                    "[AEGIS-IPC]  Message too large: {} bytes (max: {})",
                                     len, MAX_MESSAGE_SIZE
                                 );
                                 break;
