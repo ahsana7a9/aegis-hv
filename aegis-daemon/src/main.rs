@@ -1,19 +1,23 @@
 mod analysis;
+mod attestation;      // ✅ NEW: Binary integrity verification
 mod ipc;
+mod secure_ipc;       // ✅ NEW: Secure IPC with peer verification
 mod monitor;
 mod policy;
+mod safe_policy;      // ✅ NEW: Path traversal prevention
 mod isolation;
 mod db;
 
 use aya::{include_bytes_aligned, Ebpf};
 use aya::maps::perf::AsyncPerfEventArray;
-use aegis_common::{AegisCommand, AEGIS_AUTH_HASH, SecurityEvent, Severity, EventSource};
-use ipc::IpcServer;
-use policy::PolicyGuard;
+use aegis_common::{AegisCommand, SecurityEvent, Severity, EventSource};
+use secure_ipc::SecureIpcServer;
+use safe_policy::SafePolicyGuard;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
+use attestation::BinaryAttestation;
 
 pub struct AegisState {
     pub fortress_mode_active: AtomicBool,
@@ -21,49 +25,57 @@ pub struct AegisState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // --- 0. CRYPTOGRAPHIC INTEGRITY CHECK ---
-    // Prevents unauthorized or tampered binaries from attaching to the kernel.
-    if AEGIS_AUTH_HASH != "4793f0b097b830d17d12224d455476a6e5a40871e9877b0d8745c4793e2b10a9" {
-        eprintln!("\n[FATAL] Binary Integrity Compromised!");
-        eprintln!("[ERROR] Unauthorized Ownership Signature. Failed to verify Aegis-HV core.");
-        std::process::exit(1);
-    }
+    // ===== CRITICAL FIX #1: BINARY INTEGRITY VERIFICATION =====
+    // Get expected hash from environment (set by deployment infrastructure)
+    let expected_hash = std::env::var("AEGIS_BINARY_HASH")
+        .map_err(|_| anyhow::anyhow!(
+            "❌ FATAL: AEGIS_BINARY_HASH environment variable not set!\n\
+             This daemon cannot run without binary integrity verification.\n\
+             Set it via: export AEGIS_BINARY_HASH=$(sha256sum target/release/aegis-daemon | cut -d' ' -f1)"
+        ))?;
+
+    // Perform actual SHA-256 verification
+    BinaryAttestation::verify_self(&expected_hash)
+        .map_err(|e| anyhow::anyhow!("[FATAL] {}", e))?;
 
     println!("\x1b[96m");
     println!("--------------------------------------------------");
     println!("     AEGIS-HV: AUTONOMOUS SECURITY KERNEL       ");
-    println!("     v1.0.0-Genesis | Always-On Monitoring      ");
+    println!("     v1.0.1-Security | Hardened Edition         ");
     println!("--------------------------------------------------");
     println!("\x1b[0m");
 
     // 1. Initialize State & Persistence
     let state = Arc::new(AegisState {
-        fortress_mode_active: AtomicBool::new(true), 
+        fortress_mode_active: AtomicBool::new(true),
     });
 
     let pool = SqlitePool::connect("sqlite:aegis_audit.db?mode=rwc").await?;
     db::init_db(&pool).await?;
 
-    // 2. Load Security Policy (The 'Hard Rules')
-    let guard = Arc::new(PolicyGuard::load("policies/default.yaml")
-        .expect("CRITICAL: Failed to load mandatory security policy."));
+    // ===== CRITICAL FIX #4: SECURE POLICY LOADING =====
+    // Use SafePolicyGuard with path canonicalization
+    // This prevents directory traversal attacks
+    let guard = Arc::new(SafePolicyGuard::load(
+        "/etc/aegis/policies",  // Secure directory
+        "default.yaml",
+        None,  // Set to Some(hash) to verify file integrity
+    ).map_err(|e| anyhow::anyhow!("[CRITICAL] Policy loading failed: {}", e))?);
 
-    // 3. Initialize IPC (UDS Server for TUI)
-    let (server, _) = IpcServer::new();
+    // ===== CRITICAL FIX #2: SECURE IPC INITIALIZATION =====
+    // Use SecureIpcServer with SO_PEERCRED verification
+    // Socket is created in /run/aegis with 0600 permissions
+    // Only root connections are accepted
+    let (server, _) = SecureIpcServer::new(Some("/run/aegis"))?;
     let tx = server.tx.clone();
 
     // 4. Load eBPF Programs (The 'Shadow' Sensors)
-    // include_bytes_aligned! ensures the bytecode is correctly padded for the loader.
     let mut bpf = Ebpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/debug/aegis-ebpf"
     ))?;
-    
-    // Attach the eBPF sensors to the kernel hooks (Network/Syscalls/LSM)
-    // Note: Requires CAP_BPF / CAP_NET_ADMIN
-    // bpf.program_mut("aegis_sniff").unwrap().load()?;
 
     let perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS")
-        .expect("Failed to find EVENTS map in eBPF bytecode"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to find EVENTS map: {}", e))?)?;
 
     // 5. Spawn Shadow Monitor Task
     let monitor_tx = tx.clone();
@@ -73,18 +85,20 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(async move {
         if let Err(e) = monitor::start_shadow_monitoring(
-            perf_array, 
-            monitor_tx, 
-            monitor_guard, 
+            perf_array,
+            monitor_tx,
+            monitor_guard,
             monitor_pool,
-            monitor_state
-        ).await {
+            monitor_state,
+        )
+        .await {
             eprintln!("[AEGIS-DAEMON] Monitor Task Failure: {}", e);
         }
     });
 
-    // 6. Start IPC Server (Blocking call - Listen for Orchestration)
-    println!("[AEGIS-HV] Runtime Initialized. Awaiting TUI connection...");
+    // 6. Start Secure IPC Server
+    println!("[AEGIS-HV] ✓ All security checks passed. Runtime initialized.");
+    println!("[AEGIS-HV] ✓ IPC listening on /run/aegis/aegis.sock (root-only)");
     server.start_uds_server().await?;
 
     Ok(())
@@ -92,22 +106,24 @@ async fn main() -> anyhow::Result<()> {
 
 /// Helper function to route internal security events to the UI and Logs
 pub async fn handle_internal_event(event: SecurityEvent) {
-    // This would be called by isolation.rs or monitor.rs to unify the alert flow
     println!("[AEGIS-HV] ALERT: {} - {}", event.agent_id, event.reason);
 }
 
 /// Handles incoming commands from external controllers (TUI/Web API)
-pub async fn handle_command(cmd: AegisCommand, state: Arc<AegisState>) {
+pub async fn handle_command_ipc(
+    cmd: AegisCommand,
+    _tx: &broadcast::Sender<SecurityEvent>,
+) -> anyhow::Result<()> {
     match cmd {
         AegisCommand::KillAgent { agent_id } => {
-            println!("\x1b[91m[AEGIS-HV] MANUAL EMERGENCY KILL: {}\x1b[0m", agent_id);
+            println!(
+                "\x1b[91m[AEGIS-HV] MANUAL EMERGENCY KILL: {}\x1b[0m",
+                agent_id
+            );
             isolation::trigger_kill(&agent_id).await;
-        },
-        AegisCommand::ToggleFortress { enabled } => {
-            state.fortress_mode_active.store(enabled, Ordering::SeqCst);
-            println!("[AEGIS-HV] Global Policy Shift: Fortress Mode = {}", enabled);
-        },
-        AegisCommand::Ping => { /* Heartbeat check */ },
-        _ => println!("[AEGIS-HV] Unknown Command Cluster received."),
+        }
+        AegisCommand::Ping => { /* Heartbeat check */ }
+        _ => println!("[AEGIS-HV] Unknown command received."),
     }
+    Ok(())
 }
