@@ -1,10 +1,10 @@
 mod analysis;
-mod attestation;      // ✅ NEW: Binary integrity verification
+mod attestation;      //  NEW: Binary integrity verification
 mod ipc;
-mod secure_ipc;       // ✅ NEW: Secure IPC with peer verification
+mod secure_ipc;       //  NEW: Secure IPC with peer verification
 mod monitor;
 mod policy;
-mod safe_policy;      // ✅ NEW: Path traversal prevention
+mod safe_policy;      //  NEW: Path traversal prevention
 mod isolation;
 mod db;
 
@@ -26,15 +26,13 @@ pub struct AegisState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ===== CRITICAL FIX #1: BINARY INTEGRITY VERIFICATION =====
-    // Get expected hash from environment (set by deployment infrastructure)
     let expected_hash = std::env::var("AEGIS_BINARY_HASH")
         .map_err(|_| anyhow::anyhow!(
-            "❌ FATAL: AEGIS_BINARY_HASH environment variable not set!\n\
+            " FATAL: AEGIS_BINARY_HASH environment variable not set!\n\
              This daemon cannot run without binary integrity verification.\n\
              Set it via: export AEGIS_BINARY_HASH=$(sha256sum target/release/aegis-daemon | cut -d' ' -f1)"
         ))?;
 
-    // Perform actual SHA-256 verification
     BinaryAttestation::verify_self(&expected_hash)
         .map_err(|e| anyhow::anyhow!("[FATAL] {}", e))?;
 
@@ -54,18 +52,13 @@ async fn main() -> anyhow::Result<()> {
     db::init_db(&pool).await?;
 
     // ===== CRITICAL FIX #4: SECURE POLICY LOADING =====
-    // Use SafePolicyGuard with path canonicalization
-    // This prevents directory traversal attacks
     let guard = Arc::new(SafePolicyGuard::load(
-        "/etc/aegis/policies",  // Secure directory
+        "/etc/aegis/policies",
         "default.yaml",
-        None,  // Set to Some(hash) to verify file integrity
+        None,
     ).map_err(|e| anyhow::anyhow!("[CRITICAL] Policy loading failed: {}", e))?);
 
     // ===== CRITICAL FIX #2: SECURE IPC INITIALIZATION =====
-    // Use SecureIpcServer with SO_PEERCRED verification
-    // Socket is created in /run/aegis with 0600 permissions
-    // Only root connections are accepted
     let (server, _) = SecureIpcServer::new(Some("/run/aegis"))?;
     let tx = server.tx.clone();
 
