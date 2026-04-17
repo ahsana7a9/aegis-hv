@@ -4,65 +4,32 @@ version = "0.1.1"
 edition = "2021"
 
 [dependencies]
-[package]
-name = "aegis-daemon"
-version = "0.1.1"
-edition = "2021"
-
-[dependencies]
 # Workspace dependencies
 aegis-common = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+
+# eBPF Loading & Management
+aya = { version = "0.12", features = ["async_tokio"] }
+aya-log = "0.1"
+
+# Database & Logic
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
+serde_yaml = "0.9"
+bytes = "1.5"
+
+# Security dependencies
+sha2 = "0.10"
+nix = { version = "0.29", features = ["signal", "uio", "socket"] }
+zeroize = "1.7"
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }
-tempfile = "3.8"           # For temporary test directories
-mockito = "1.2"            # For mocking external calls (optional)
+tempfile = "3.8"
+mockito = "1.2"
 
-# eBPF Loading & Management
-aya = { version = "0.12", features = ["async_tokio"] }
-aya-log = "0.1"
-
-# Database & Logic
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
-serde_yaml = "0.9"
-bytes = "1.5"
-
-# ✅ NEW SECURITY DEPENDENCIES - Add these three lines
-sha2 = "0.10"              # Binary integrity verification & policy hashing
-nix = { version = "0.29", features = ["signal", "uio", "socket"] }  # SO_PEERCRED, signals
-zeroize = "1.7"            # Secure memory handling for sensitive data
-
-# Internal modules
-[lib]
-path = "src/lib.rs"
-
-# Workspace dependencies
-aegis-common = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-chrono = { workspace = true }
-
-# eBPF Loading & Management
-aya = { version = "0.12", features = ["async_tokio"] }
-aya-log = "0.1"
-
-# Database & Logic
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
-serde_yaml = "0.9"
-bytes = "1.5"
-
-#  NEW SECURITY DEPENDENCIES - Add these three lines
-sha2 = "0.10"              # Binary integrity verification & policy hashing
-nix = { version = "0.29", features = ["signal", "uio", "socket"] }  # SO_PEERCRED, signals
-zeroize = "1.7"            # Secure memory handling for sensitive data
-
-# Internal modules
 [lib]
 path = "src/lib.rs"
