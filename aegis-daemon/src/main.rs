@@ -1,10 +1,10 @@
 mod analysis;
-mod attestation;      //  NEW: Binary integrity verification
+mod attestation;      // ✅ NEW: Binary integrity verification
 mod ipc;
-mod secure_ipc;       //  NEW: Secure IPC with peer verification
+mod secure_ipc;       // ✅ NEW: Secure IPC with peer verification
 mod monitor;
 mod policy;
-mod safe_policy;      //  NEW: Path traversal prevention
+mod safe_policy;      // ✅ NEW: Path traversal prevention
 mod isolation;
 mod db;
 
@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     // ===== CRITICAL FIX #1: BINARY INTEGRITY VERIFICATION =====
     let expected_hash = std::env::var("AEGIS_BINARY_HASH")
         .map_err(|_| anyhow::anyhow!(
-            " FATAL: AEGIS_BINARY_HASH environment variable not set!\n\
+            "❌ FATAL: AEGIS_BINARY_HASH environment variable not set!\n\
              This daemon cannot run without binary integrity verification.\n\
              Set it via: export AEGIS_BINARY_HASH=$(sha256sum target/release/aegis-daemon | cut -d' ' -f1)"
         ))?;
