@@ -1,14 +1,10 @@
-[dependencies]
-aegis-common = { path = "../aegis-common" }
-interprocess = "2.4.0" # Best-in-class 2026 IPC crate
-tokio = { version = "1.42", features = ["full"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 [package]
 name = "aegis-daemon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
+# Workspace dependencies
 aegis-common = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -24,6 +20,11 @@ aya-log = "0.1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
 serde_yaml = "0.9"
 bytes = "1.5"
+
+# ✅ NEW SECURITY DEPENDENCIES
+sha2 = "0.10"              # Binary integrity verification & policy hashing
+nix = { version = "0.29", features = ["signal", "uio", "socket"] }  # SO_PEERCRED, signals
+zeroize = "1.7"            # Secure memory handling for sensitive data
 
 # Internal modules
 [lib]
