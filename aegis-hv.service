@@ -1,17 +1,91 @@
 [Unit]
-Description=Aegis-HV Autonomous Security Hypervisor
-After=network.target sqlit3.service
-ConditionPathExists=/etc/aegis/policies/default.yaml
+Description=Aegis-HV: Autonomous Hypervisor Security Layer for AI Agents
+Documentation=https://github.com/ahsana7a9/aegis-hv
+After=network-pre.target
+Before=docker.service multi-user.target
+ConditionVirtualization=!container
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/aegis-daemon --config /etc/aegis/policies/default.yaml
+
+# ===== CRITICAL FIX #1: BINARY INTEGRITY VERIFICATION =====
+# Set the SHA-256 hash of your authorized daemon binary
+# Generate via: sha256sum /usr/local/bin/aegis-daemon | cut -d' ' -f1
+Environment="AEGIS_BINARY_HASH=4793f0b097b830d17d12224d455476a6e5a40871e9877b0d8745c4793e2b10a9"
+
+# ===== CRITICAL FIX #2 & #4: SECURE IPC & POLICY DIRECTORIES =====
+RuntimeDirectory=aegis
+RuntimeDirectoryMode=0700
+
+# ===== POLICY DIRECTORY BINDING =====
+ReadWritePaths=/var/lib/aegis /var/log/aegis
+ProtectSystem=strict
+ProtectHome=yes
+
+# ===== IPC CONFIGURATION =====
+# Socket location: /run/aegis/aegis.sock (created by RuntimeDirectory)
+# Permissions: 0600 (root-only read/write)
+
+# ===== RESTART BEHAVIOR =====
 Restart=always
-RestartSec=5
-# Security Hardening
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
+RestartSec=5s
+StartLimitIntervalSec=300s
+StartLimitBurst=5
+
+# Binary and start command
+ExecStart=/usr/local/bin/aegis-daemon
+
+# ===== CAPABILITY HARDENING =====
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_NET_RAW
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_RESOURCE
+SecureBits=keep-caps keep-caps-locked noroot-locked no-setuid-fixup no-setuid-fixup-locked
+
+# ===== PRIVILEGE & EXECUTION HARDENING =====
 NoNewPrivileges=true
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+# ===== MEMORY & RESOURCE HARDENING =====
+Nice=-15
+OOMScoreAdjust=-1000
+MemoryDenyWriteExecute=true
+LockPersonality=true
+
+# ===== LOGGING & JOURNAL INTEGRATION =====
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aegis-daemon
+SyslogLevelPrefix=yes
+AuditWriteAccessOnWrite=yes
+
+# ===== SECURITY EVENT AUDITING =====
+# ===== FILE SYSTEM HARDENING =====
+ProtectSystem=strict
+PrivateTmp=yes
+
+# ===== NETWORK ISOLATION =====
+PrivateNetwork=no
+
+# ===== USER & GROUP =====
+User=root
+Group=root
+
+# ===== ENVIRONMENT VARIABLES =====
+Environment="AEGIS_POLICY_DIR=/etc/aegis/policies"
+Environment="AEGIS_AUDIT_DB=/var/lib/aegis/audit.db"
+Environment="RUST_LOG=aegis_daemon=info,aegis_ebpf=warn"
+
+# ===== TIMEOUT BEHAVIOR =====
+TimeoutStartSec=30s
+TimeoutStopSec=10s
+KillMode=mixed
+
+# ===== DEPENDENCY & ORDERING =====
+ConditionPathExists=/etc/aegis/policies/default.yaml
 
 [Install]
 WantedBy=multi-user.target
