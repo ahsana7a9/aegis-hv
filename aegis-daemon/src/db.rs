@@ -1,10 +1,14 @@
 use sqlx::sqlite::SqlitePool;
 use aegis_common::SecurityEvent;
 use chrono::Utc;
+use uuid::Uuid;
 
 /// Initializes all database schemas for the Aegis-HV environment.
 pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
-    // 1. High-level Security Events (Alerts/Mitigations/Policy Breaches)
+
+    // ─────────────────────────────────────────────
+    // SECURITY EVENTS
+    // ─────────────────────────────────────────────
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS security_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12,6 +16,7 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
             source TEXT NOT NULL,
             severity TEXT NOT NULL,
             agent_id TEXT NOT NULL,
+            action_attempted TEXT NOT NULL,
             reason TEXT NOT NULL,
             mitigated BOOLEAN NOT NULL
         );"
@@ -19,64 +24,73 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // 2. Low-level Behavior Forensics (The Forensic "Black Box")
-    // Added agent_id for cross-referencing PID events with verified identities.
+    // ─────────────────────────────────────────────
+    // BEHAVIOR LOGS
+    // ─────────────────────────────────────────────
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS behavior_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp DATETIME NOT NULL,
             pid INTEGER NOT NULL,
             agent_id TEXT,
-            event_type TEXT NOT NULL, 
-            details TEXT NOT NULL,    
+            event_type TEXT NOT NULL,
+            details TEXT NOT NULL,
             risk_score REAL DEFAULT 0.0
         );"
     )
     .execute(pool)
     .await?;
 
-    println!("[DB] Aegis-HV persistence layers initialized.");
+    println!("[DB] ✓ Supervisor persistence initialized.");
     Ok(())
 }
 
-/// Logs a high-level security event (e.g., an agent was killed or a policy breached).
+/// Logs a high-level security event
 pub async fn log_event(pool: &SqlitePool, event: &SecurityEvent) -> anyhow::Result<()> {
+
     sqlx::query!(
-        "INSERT INTO security_logs (timestamp, source, severity, agent_id, reason, mitigated) 
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO security_logs 
+        (timestamp, source, severity, agent_id, action_attempted, reason, mitigated)
+        VALUES (?, ?, ?, ?, ?, ?, ?)",
         event.timestamp,
         format!("{:?}", event.source),
         format!("{:?}", event.severity),
-        event.agent_id,
+        event.agent_id.to_string(), // ✅ UUID → string
+        event.action_attempted,
         event.reason,
         event.mitigated
     )
     .execute(pool)
     .await?;
+
     Ok(())
 }
 
-/// Logs granular behavior captured from eBPF sensors (Process/Network/File).
+/// Logs low-level behavior (eBPF / system events)
 pub async fn log_behavior(
-    pool: &SqlitePool, 
+    pool: &SqlitePool,
     pid: u32,
-    agent_id: Option<&str>,
-    event_type: &str, 
-    details: &str, 
+    agent_id: Option<Uuid>,
+    event_type: &str,
+    details: &str,
     risk: f64
 ) -> anyhow::Result<()> {
+
     let now = Utc::now();
+
     sqlx::query!(
-        "INSERT INTO behavior_logs (timestamp, pid, agent_id, event_type, details, risk_score) 
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO behavior_logs 
+        (timestamp, pid, agent_id, event_type, details, risk_score)
+        VALUES (?, ?, ?, ?, ?, ?)",
         now,
         pid,
-        agent_id,
+        agent_id.map(|id| id.to_string()), // ✅ FIXED
         event_type,
         details,
         risk
     )
     .execute(pool)
     .await?;
+
     Ok(())
 }
