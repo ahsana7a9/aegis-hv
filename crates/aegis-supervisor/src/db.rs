@@ -1,4 +1,4 @@
-use sqlx::sqlite::{SqlitePool, SqliteQueryResult};
+use sqlx::sqlite::SqlitePool;
 use aegis_common::SecurityEvent;
 use chrono::Utc;
 use uuid::Uuid;
@@ -9,13 +9,13 @@ use crate::signer::LogSigner;
 use crate::replicator::LogReplicator;
 
 // ─────────────────────────────────────────────
-// CONSTANTS (DOMAIN SEPARATION)
+// DOMAIN SEPARATION
 // ─────────────────────────────────────────────
 
-const LOG_DOMAIN: &[u8] = b"AEGIS_LOG_CHAIN_V1";
+const LOG_DOMAIN: &[u8] = b"AEGIS_LOG_CHAIN_V2";
 
 // ─────────────────────────────────────────────
-// INIT DB (SCHEMA + INDEXES)
+// INIT DB
 // ─────────────────────────────────────────────
 
 pub async fn init_db(pool: &SqlitePool) -> Result<()> {
@@ -23,7 +23,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS security_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            log_index INTEGER NOT NULL,
+            log_index INTEGER NOT NULL UNIQUE,
             timestamp DATETIME NOT NULL,
             source TEXT NOT NULL,
             severity TEXT NOT NULL,
@@ -59,30 +59,32 @@ pub async fn init_db(pool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_timestamp ON security_logs(timestamp);")
         .execute(pool).await?;
 
-    println!("[DB] ✓ Hardened forensic logging initialized");
+    println!("[DB] ✓ V2 forensic ledger initialized");
 
     Ok(())
 }
 
 // ─────────────────────────────────────────────
-// CANONICAL HASH (BLAKE3)
+// HASH
 // ─────────────────────────────────────────────
 
 fn compute_hash(data: &[u8]) -> String {
     blake3::hash(data).to_hex().to_string()
 }
 
-// Canonical encoding (NO format! drift)
-fn canonical_log_bytes(
+// ─────────────────────────────────────────────
+// CANONICAL ENCODING (STRICT)
+// ─────────────────────────────────────────────
+
+fn canonical_bytes(
     event: &SecurityEvent,
     prev_hash: &str,
     index: u64,
-) -> Result<Vec<u8>> {
+) -> Vec<u8> {
 
-    let mut data = Vec::new();
+    let mut data = Vec::with_capacity(256);
 
     data.extend(LOG_DOMAIN);
-
     data.extend(&index.to_le_bytes());
 
     data.extend(event.timestamp.to_rfc3339().as_bytes());
@@ -91,15 +93,16 @@ fn canonical_log_bytes(
     data.extend(event.agent_id.as_bytes());
     data.extend(event.action_attempted.as_bytes());
     data.extend(event.reason.as_bytes());
-    data.extend(&(event.mitigated as u8).to_le_bytes());
+
+    data.push(event.mitigated as u8);
 
     data.extend(prev_hash.as_bytes());
 
-    Ok(data)
+    data
 }
 
 // ─────────────────────────────────────────────
-// INTERNAL HELPERS
+// STATE
 // ─────────────────────────────────────────────
 
 async fn get_last_state(pool: &SqlitePool) -> Result<(u64, String)> {
@@ -117,7 +120,7 @@ async fn get_last_state(pool: &SqlitePool) -> Result<(u64, String)> {
 }
 
 // ─────────────────────────────────────────────
-// LOG EVENT (CHAIN + SIGN + REPLICATE)
+// LOG EVENT (STRICT + QUORUM ENFORCED)
 // ─────────────────────────────────────────────
 
 pub async fn log_event(
@@ -132,16 +135,17 @@ pub async fn log_event(
     let (last_index, prev_hash) = get_last_state(pool).await?;
     let index = last_index + 1;
 
-    // CANONICAL BYTES
-    let data = canonical_log_bytes(event, &prev_hash, index)?;
+    // Canonical encoding
+    let data = canonical_bytes(event, &prev_hash, index);
 
-    // 🔥 BLAKE3 HASH
+    // Hash
     let hash = compute_hash(&data);
 
-    // 🔐 SIGN HASH
+    // Sign HASH (hash-then-sign)
     let signature = signer.sign(hash.as_bytes())?;
 
-    let res: SqliteQueryResult = sqlx::query!(
+    // Store locally FIRST (atomic)
+    sqlx::query!(
         "INSERT INTO security_logs 
         (log_index, timestamp, source, severity, agent_id, action_attempted, reason, mitigated, prev_hash, hash, signature)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -149,7 +153,7 @@ pub async fn log_event(
         event.timestamp,
         format!("{:?}", event.source),
         format!("{:?}", event.severity),
-        event.agent_id.to_string(),
+        event.agent_id,
         event.action_attempted,
         event.reason,
         event.mitigated,
@@ -162,14 +166,18 @@ pub async fn log_event(
 
     tx.commit().await?;
 
-    // 🔁 REPLICATE FULL ENVELOPE (not raw event)
+    // 🔴 FAIL-CLOSED REPLICATION (QUORUM REQUIRED)
     if let Some(rep) = replicator {
-        let envelope = (
-            index,
-            &event,
-            hash,
-        );
-        let _ = rep.send(&envelope).await;
+
+        let envelope = serde_json::json!({
+            "index": index,
+            "event": event,
+            "hash": hash,
+            "signature": base64::encode(signature),
+        });
+
+        // 🔥 MUST SUCCEED (NO SILENT FAIL)
+        rep.replicate(&envelope).await?;
     }
 
     Ok(())
@@ -208,7 +216,7 @@ pub async fn log_behavior(
 }
 
 // ─────────────────────────────────────────────
-// VERIFY LOG CHAIN (FULL FORENSIC)
+// VERIFY CHAIN (STRICT + SIGNATURE)
 // ─────────────────────────────────────────────
 
 pub async fn verify_log_chain(
@@ -218,7 +226,7 @@ pub async fn verify_log_chain(
 
     let rows = sqlx::query!(
         "SELECT log_index, timestamp, source, severity, agent_id, action_attempted, reason, mitigated, prev_hash, hash, signature 
-         FROM security_logs ORDER BY id ASC"
+         FROM security_logs ORDER BY log_index ASC"
     )
     .fetch_all(pool)
     .await?;
@@ -237,32 +245,32 @@ pub async fn verify_log_chain(
             mitigated: row.mitigated,
         };
 
-        let data = canonical_log_bytes(
+        let data = canonical_bytes(
             &event,
             &row.prev_hash.clone().unwrap_or_default(),
             row.log_index as u64
-        )?;
+        );
 
         let computed = compute_hash(&data);
 
         if computed != row.hash {
-            return Err(anyhow!("🚨 LOG TAMPERING DETECTED at index {}", row.log_index));
+            return Err(anyhow!("🚨 TAMPERING at index {}", row.log_index));
         }
 
-        // 🔐 VERIFY SIGNATURE
+        // Verify signature
         let sig = ed25519_dalek::Signature::from_bytes(&row.signature)?;
         pubkey
             .verify(row.hash.as_bytes(), &sig)
-            .map_err(|_| anyhow!("🚨 SIGNATURE FORGERY DETECTED"))?;
+            .map_err(|_| anyhow!("🚨 SIGNATURE FORGERY at {}", row.log_index))?;
 
         if row.prev_hash.unwrap_or_default() != last_hash {
-            return Err(anyhow!("🚨 HASH CHAIN BROKEN at index {}", row.log_index));
+            return Err(anyhow!("🚨 CHAIN BREAK at {}", row.log_index));
         }
 
         last_hash = row.hash.clone();
     }
 
-    println!("[DB] ✓ Full forensic integrity verified");
+    println!("[DB] ✓ Ledger integrity VERIFIED");
 
     Ok(())
 }
