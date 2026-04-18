@@ -3,7 +3,7 @@ use aegis_common::SecurityEvent;
 use chrono::Utc;
 use uuid::Uuid;
 use anyhow::{Result, anyhow};
-use sha2::{Sha256, Digest};
+use blake3;
 
 use crate::signer::LogSigner;
 use crate::replicator::LogReplicator;
@@ -63,9 +63,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<()> {
 // ─────────────────────────────────────────────
 
 fn compute_hash(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input);
-    hex::encode(hasher.finalize())
+    blake3::hash(input.as_bytes()).to_hex().to_string()
 }
 
 async fn get_last_hash(pool: &SqlitePool) -> Result<Option<String>> {
