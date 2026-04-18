@@ -14,17 +14,3 @@ pub struct AgentMetadata {
     pub version: String,
     pub created_at: i64,
 }
-
-impl AgentIdentity {
-    pub fn new(role: &str, pubkey: Vec<u8>) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            role: role.to_string(),
-            public_key: pubkey,
-            metadata: AgentMetadata {
-                version: "1.0.0-Genesis".to_string(),
-                created_at: chrono::Utc::now().timestamp(),
-            },
-        }
-    }
-}
