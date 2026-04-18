@@ -1,13 +1,17 @@
-use aegis_common::{AgentIdentity, AgentMetadata};
+use aegis_common::{AgentIdentity, AgentMetadata, PublicKeyEntry, Role};
 use uuid::Uuid;
 
-pub fn create_identity(role: &str, public_key: Vec<u8>) -> AgentIdentity {
+pub fn create_identity(role: Role, public_key: [u8; 32]) -> AgentIdentity {
     AgentIdentity {
         id: Uuid::new_v4(),
-        role: role.to_string(),
-        public_key,
+        role,
+        keys: vec![PublicKeyEntry {
+            key: public_key,
+            version: 1,
+            active: true,
+        }],
         metadata: AgentMetadata {
-            version: "1.0.0-Genesis".to_string(),
+            version: "1.0.0".to_string(),
             created_at: chrono::Utc::now().timestamp(),
         },
     }
