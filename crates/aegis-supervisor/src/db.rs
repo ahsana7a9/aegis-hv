@@ -104,7 +104,7 @@ pub async fn log_event(
     let hash = compute_hash(&data_string);
 
     // SIGN HASH
-    let signature = signer.sign(hash.as_bytes());
+    let signature = signer.sign(hash.as_bytes())?;
 
     sqlx::query!(
         "INSERT INTO security_logs 
