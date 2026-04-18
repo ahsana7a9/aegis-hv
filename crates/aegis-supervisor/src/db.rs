@@ -1,4 +1,4 @@
-use sqlx::sqlite::SqlitePool;
+use sqlx::sqlite::{SqlitePool, SqliteQueryResult};
 use aegis_common::SecurityEvent;
 use chrono::Utc;
 use uuid::Uuid;
@@ -9,6 +9,12 @@ use crate::signer::LogSigner;
 use crate::replicator::LogReplicator;
 
 // ─────────────────────────────────────────────
+// CONSTANTS (DOMAIN SEPARATION)
+// ─────────────────────────────────────────────
+
+const LOG_DOMAIN: &[u8] = b"AEGIS_LOG_CHAIN_V1";
+
+// ─────────────────────────────────────────────
 // INIT DB (SCHEMA + INDEXES)
 // ─────────────────────────────────────────────
 
@@ -17,6 +23,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS security_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            log_index INTEGER NOT NULL,
             timestamp DATETIME NOT NULL,
             source TEXT NOT NULL,
             severity TEXT NOT NULL,
@@ -46,32 +53,67 @@ pub async fn init_db(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // INDEXES
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_id ON security_logs(agent_id);")
         .execute(pool).await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_timestamp ON security_logs(timestamp);")
         .execute(pool).await?;
 
-    println!("[DB] ✓ Secure forensic logging initialized");
+    println!("[DB] ✓ Hardened forensic logging initialized");
 
     Ok(())
 }
 
 // ─────────────────────────────────────────────
-// HASH UTILS
+// CANONICAL HASH (BLAKE3)
 // ─────────────────────────────────────────────
 
-fn compute_hash(input: &str) -> String {
-    blake3::hash(input.as_bytes()).to_hex().to_string()
+fn compute_hash(data: &[u8]) -> String {
+    blake3::hash(data).to_hex().to_string()
 }
 
-async fn get_last_hash(pool: &SqlitePool) -> Result<Option<String>> {
-    let row = sqlx::query!("SELECT hash FROM security_logs ORDER BY id DESC LIMIT 1")
-        .fetch_optional(pool)
-        .await?;
+// Canonical encoding (NO format! drift)
+fn canonical_log_bytes(
+    event: &SecurityEvent,
+    prev_hash: &str,
+    index: u64,
+) -> Result<Vec<u8>> {
 
-    Ok(row.map(|r| r.hash))
+    let mut data = Vec::new();
+
+    data.extend(LOG_DOMAIN);
+
+    data.extend(&index.to_le_bytes());
+
+    data.extend(event.timestamp.to_rfc3339().as_bytes());
+    data.extend(format!("{:?}", event.source).as_bytes());
+    data.extend(format!("{:?}", event.severity).as_bytes());
+    data.extend(event.agent_id.as_bytes());
+    data.extend(event.action_attempted.as_bytes());
+    data.extend(event.reason.as_bytes());
+    data.extend(&(event.mitigated as u8).to_le_bytes());
+
+    data.extend(prev_hash.as_bytes());
+
+    Ok(data)
+}
+
+// ─────────────────────────────────────────────
+// INTERNAL HELPERS
+// ─────────────────────────────────────────────
+
+async fn get_last_state(pool: &SqlitePool) -> Result<(u64, String)> {
+
+    let row = sqlx::query!(
+        "SELECT log_index, hash FROM security_logs ORDER BY id DESC LIMIT 1"
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(r) => Ok((r.log_index as u64, r.hash)),
+        None => Ok((0, String::new())),
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -85,29 +127,25 @@ pub async fn log_event(
     replicator: Option<&LogReplicator>,
 ) -> Result<()> {
 
-    let prev_hash = get_last_hash(pool).await?.unwrap_or_default();
+    let mut tx = pool.begin().await?;
 
-    let data_string = format!(
-        "{}|{:?}|{:?}|{}|{}|{}|{}|{}",
-        event.timestamp,
-        event.source,
-        event.severity,
-        event.agent_id,
-        event.action_attempted,
-        event.reason,
-        event.mitigated,
-        prev_hash
-    );
+    let (last_index, prev_hash) = get_last_state(pool).await?;
+    let index = last_index + 1;
 
-    let hash = compute_hash(&data_string);
+    // CANONICAL BYTES
+    let data = canonical_log_bytes(event, &prev_hash, index)?;
 
-    // SIGN HASH
+    // 🔥 BLAKE3 HASH
+    let hash = compute_hash(&data);
+
+    // 🔐 SIGN HASH
     let signature = signer.sign(hash.as_bytes())?;
 
-    sqlx::query!(
+    let res: SqliteQueryResult = sqlx::query!(
         "INSERT INTO security_logs 
-        (timestamp, source, severity, agent_id, action_attempted, reason, mitigated, prev_hash, hash, signature)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (log_index, timestamp, source, severity, agent_id, action_attempted, reason, mitigated, prev_hash, hash, signature)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        index as i64,
         event.timestamp,
         format!("{:?}", event.source),
         format!("{:?}", event.severity),
@@ -119,12 +157,19 @@ pub async fn log_event(
         hash,
         signature
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    // 🔁 NON-BLOCKING REPLICATION
+    tx.commit().await?;
+
+    // 🔁 REPLICATE FULL ENVELOPE (not raw event)
     if let Some(rep) = replicator {
-        let _ = rep.send(event).await;
+        let envelope = (
+            index,
+            &event,
+            hash,
+        );
+        let _ = rep.send(&envelope).await;
     }
 
     Ok(())
@@ -163,13 +208,16 @@ pub async fn log_behavior(
 }
 
 // ─────────────────────────────────────────────
-// VERIFY LOG CHAIN (TAMPER DETECTION)
+// VERIFY LOG CHAIN (FULL FORENSIC)
 // ─────────────────────────────────────────────
 
-pub async fn verify_log_chain(pool: &SqlitePool) -> Result<()> {
+pub async fn verify_log_chain(
+    pool: &SqlitePool,
+    pubkey: &ed25519_dalek::PublicKey
+) -> Result<()> {
 
     let rows = sqlx::query!(
-        "SELECT id, timestamp, source, severity, agent_id, action_attempted, reason, mitigated, prev_hash, hash 
+        "SELECT log_index, timestamp, source, severity, agent_id, action_attempted, reason, mitigated, prev_hash, hash, signature 
          FROM security_logs ORDER BY id ASC"
     )
     .fetch_all(pool)
@@ -179,34 +227,42 @@ pub async fn verify_log_chain(pool: &SqlitePool) -> Result<()> {
 
     for row in rows {
 
-        let prev_hash = row.prev_hash.clone().unwrap_or_default();
+        let event = SecurityEvent {
+            timestamp: row.timestamp,
+            source: row.source.parse().unwrap_or_default(),
+            severity: row.severity.parse().unwrap_or_default(),
+            agent_id: row.agent_id.clone(),
+            action_attempted: row.action_attempted.clone(),
+            reason: row.reason.clone(),
+            mitigated: row.mitigated,
+        };
 
-        let data_string = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}",
-            row.timestamp,
-            row.source,
-            row.severity,
-            row.agent_id,
-            row.action_attempted,
-            row.reason,
-            row.mitigated,
-            prev_hash
-        );
+        let data = canonical_log_bytes(
+            &event,
+            &row.prev_hash.clone().unwrap_or_default(),
+            row.log_index as u64
+        )?;
 
-        let computed = compute_hash(&data_string);
+        let computed = compute_hash(&data);
 
         if computed != row.hash {
-            return Err(anyhow!("🚨 LOG TAMPERING DETECTED at ID {}", row.id));
+            return Err(anyhow!("🚨 LOG TAMPERING DETECTED at index {}", row.log_index));
         }
 
-        if prev_hash != last_hash {
-            return Err(anyhow!("🚨 HASH CHAIN BROKEN at ID {}", row.id));
+        // 🔐 VERIFY SIGNATURE
+        let sig = ed25519_dalek::Signature::from_bytes(&row.signature)?;
+        pubkey
+            .verify(row.hash.as_bytes(), &sig)
+            .map_err(|_| anyhow!("🚨 SIGNATURE FORGERY DETECTED"))?;
+
+        if row.prev_hash.unwrap_or_default() != last_hash {
+            return Err(anyhow!("🚨 HASH CHAIN BROKEN at index {}", row.log_index));
         }
 
         last_hash = row.hash.clone();
     }
 
-    println!("[DB] ✓ Log chain integrity verified");
+    println!("[DB] ✓ Full forensic integrity verified");
 
     Ok(())
 }
