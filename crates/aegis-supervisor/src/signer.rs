@@ -1,16 +1,30 @@
-use ed25519_dalek::{Keypair, Signer, Signature};
+use ed25519_dalek::{Keypair, Signer};
 use anyhow::Result;
 
+use crate::tpm_signer::tpm_sign;
+
+pub enum SignMode {
+    TPM,
+    Software(Keypair),
+}
+
 pub struct LogSigner {
-    keypair: Keypair,
+    mode: SignMode,
 }
 
 impl LogSigner {
-    pub fn new(keypair: Keypair) -> Self {
-        Self { keypair }
+    pub fn new_tpm() -> Self {
+        Self { mode: SignMode::TPM }
     }
 
-    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        self.keypair.sign(message).to_bytes().to_vec()
+    pub fn new_software(keypair: Keypair) -> Self {
+        Self { mode: SignMode::Software(keypair) }
+    }
+
+    pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>> {
+        match &self.mode {
+            SignMode::TPM => tpm_sign(message),
+            SignMode::Software(kp) => Ok(kp.sign(message).to_bytes().to_vec()),
+        }
     }
 }
