@@ -1,40 +1,45 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use futures::future::join_all;
+
+use crate::quorum::require_quorum;
 
 pub struct LogReplicator {
     client: Client,
-    endpoint: String,
-    counter: AtomicU64,
-}
-
-#[derive(Serialize)]
-struct ReplicatedLog<'a, T> {
-    index: u64,
-    payload: &'a T,
+    nodes: Vec<String>,
 }
 
 impl LogReplicator {
-    pub fn new(endpoint: String) -> Self {
+    pub fn new(nodes: Vec<String>) -> Self {
         Self {
             client: Client::new(),
-            endpoint,
-            counter: AtomicU64::new(0),
+            nodes,
         }
     }
 
-    pub async fn send<T: Serialize>(&self, log: &T) -> Result<()> {
-        let index = self.counter.fetch_add(1, Ordering::SeqCst);
+    pub async fn replicate<T: Serialize>(&self, log: &T) -> Result<()> {
 
-        let payload = ReplicatedLog { index, payload: log };
+        let futures = self.nodes.iter().map(|node| {
+            self.client
+                .post(format!("{}/append", node))
+                .json(log)
+                .send()
+        });
 
-        self.client
-            .post(&self.endpoint)
-            .json(&payload)
-            .send()
-            .await?
-            .error_for_status()?;
+        let results = join_all(futures).await;
+
+        let mut success = 0;
+
+        for res in results {
+            if let Ok(r) = res {
+                if r.status().is_success() {
+                    success += 1;
+                }
+            }
+        }
+
+        require_quorum(success, self.nodes.len())?;
 
         Ok(())
     }
