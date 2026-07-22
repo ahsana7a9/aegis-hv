@@ -1,6 +1,7 @@
 // --- Core Security & Analysis Modules ---
 pub mod analysis;      // Shannon Entropy and behavioral risk scoring
-pub mod attestation;   // ✅ NEW: Binary integrity verification
+pub mod attestation;   // ✅ PATCH 1: Binary integrity verification
+pub mod entropy;       // ✅ PATCH 2: Protocol-aware entropy filtering
 pub mod monitor;       // eBPF event ingestion and telemetry processing
 pub mod response;      // Mitigation logic and threat reaction
 
@@ -17,7 +18,8 @@ pub mod secure_ipc;    // ✅ NEW: Root-only UDS with SO_PEERCRED verification
 // --- Enforcement & Sandboxing ---
 pub mod enforcement;   // Kernel-level enforcement logic
 pub mod isolation;     // Process termination and resource isolation
-pub mod sandbox;       // ✅ NEW: Wasmtime orchestration and VM management
+pub mod sandbox;       // ✅ PATCH 4: Enhanced hybrid sandbox (Wasmtime + seccomp/bwrap)
+pub mod privileges;    // ✅ PATCH 3: Privilege dropping & capability isolation
 
 // --- Testing ---
 #[cfg(test)]
@@ -25,9 +27,11 @@ mod tests;             // ✅ NEW: Unit tests for core security modules
 
 // --- Global Re-exports ---
 pub use attestation::BinaryAttestation;
+pub use entropy::SmartEntropyEngine;
 pub use errors::{AegisError, AegisResult};
 pub use isolation::IsolationHandler;
 pub use monitor::SharedEventBuffer;
+pub use privileges::drop_root_privileges;
 pub use response::ResponseSystem;
 pub use safe_policy::SafePolicyGuard;
 pub use secure_ipc::SecureIpcServer;
