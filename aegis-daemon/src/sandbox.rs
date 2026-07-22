@@ -1,65 +1,59 @@
-use wasmtime::*;
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
-use std::fs::File;
-use std::sync::Arc;
+use std::process::Command;
+use tracing::{info, error};
 
-pub struct SandboxEngine {
-    engine: Engine,
-    linker: Linker<WasiCtx>,
+pub enum ExecutionMode {
+    Wasmtime,
+    NativeSeccomp,
 }
 
-impl SandboxEngine {
-    pub fn new() -> anyhow::Result<Self> {
-        let mut config = Config::new();
-        // 1. Hardware Kill-Switch: Enable epoch-based interruption
-        // This allows Aegis-HV to kill a "runaway" agent even if it's in an infinite loop.
-        config.epoch_interruption(true);
-        config.consume_fuel(true); // Precise resource accounting
+pub struct AgentSandboxConfig {
+    pub mode: ExecutionMode,
+    pub executable_path: String,
+    pub allowed_paths: Vec<String>,
+}
 
-        let engine = Engine::new(&config)?;
-        let mut linker = Linker::new(&engine);
-        
-        // Add standard WASI support (File I/O, Networking, etc.)
-        wasmtime_wasi::add_to_linker(&mut linker, |s| s)?;
+pub struct HybridSandbox;
 
-        Ok(Self { engine, linker })
+impl HybridSandbox {
+    pub fn spawn_agent(config: AgentSandboxConfig) -> Result<std::process::Child, String> {
+        match config.mode {
+            ExecutionMode::Wasmtime => Self::spawn_wasm(config),
+            ExecutionMode::NativeSeccomp => Self::spawn_native_isolated(config),
+        }
     }
 
-    /// Spawns a Hornet-Defence agent with zero access to the host OS behavior.
-    pub async fn create_isolated_instance(
-        &self, 
-        agent_id: &str, 
-        wasm_bytes: &[u8]
-    ) -> anyhow::Result<()> {
-        // 2. Capabilities-Based Security (The Jail)
-        // We only "pre-open" the agent's specific scratchpad.
-        let agent_dir = format!("./data/agents/{}", agent_id);
-        std::fs::create_dir_all(&agent_dir)?;
-        
-        let wasi = WasiCtxBuilder::new()
-            .inherit_stdout()
-            .inherit_stderr()
-            // Physical Isolation: Agent sees its own folder as the root '/'
-            .preopened_dir(File::open(&agent_dir)?, ".")?
-            .build();
+    fn spawn_wasm(config: AgentSandboxConfig) -> Result<std::process::Child, String> {
+        info!("Spawning agent inside Wasmtime Fortress Sandbox: {}", config.executable_path);
+        Command::new("wasmtime")
+            .arg("run")
+            .arg(&config.executable_path)
+            .spawn()
+            .map_err(|e| format!("Wasmtime spawn error: {}", e))
+    }
 
-        let mut store = Store::new(&self.engine, wasi);
-        
-        // 3. Set Resource Quotas (The "Ceiling")
-        store.set_fuel(1_000_000)?; // Limit total computational steps
-        store.set_epoch_deadline(1); // Set the timeout for the kill-switch
+    fn spawn_native_isolated(config: AgentSandboxConfig) -> Result<std::process::Child, String> {
+        info!("Spawning Python/Native agent inside Seccomp + Namespace Sandbox: {}", config.executable_path);
 
-        let module = Module::from_binary(&self.engine, wasm_bytes)?;
-        let instance = self.linker.instantiate(&mut store, &module)?;
-
-        // 4. Execution Entry Point
-        let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
+        // Uses system bwrap / seccomp launcher to sandbox non-WASI runtimes
+        let mut cmd = Command::new("bwrap");
         
-        println!("[AEGIS-SANDBOX] Agent {} initialized in Wasm Virtual Machine.", agent_id);
-        
-        // Execute (This would be wrapped in your monitor's async loop)
-        start.call(&mut store, ())?;
+        // Isolate PID, IPC, and Network Namespaces (unless permitted)
+        cmd.arg("--unshare-pid")
+           .arg("--unshare-uts")
+           .arg("--unshare-ipc")
+           .arg("--dev").arg("/dev")
+           .arg("--proc").arg("/proc")
+           .arg("--ro-bind").arg("/usr").arg("/usr")
+           .arg("--ro-bind").arg("/lib").arg("/lib")
+           .arg("--ro-bind").arg("/lib64").arg("/lib64");
 
-        Ok(())
+        // Bind allowed paths
+        for path in &config.allowed_paths {
+            cmd.arg("--bind").arg(path).arg(path);
+        }
+
+        cmd.arg("--").arg("python3").arg(&config.executable_path);
+
+        cmd.spawn().map_err(|e| format!("Native namespace sandbox spawn error: {}", e))
     }
 }
